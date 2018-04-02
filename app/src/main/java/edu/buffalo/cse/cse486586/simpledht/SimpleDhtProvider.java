@@ -4,6 +4,7 @@ import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
+import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
@@ -18,7 +19,9 @@ import java.net.Socket;
 import java.net.UnknownHostException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Formatter;
+import java.util.List;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 
@@ -32,7 +35,8 @@ public class SimpleDhtProvider extends ContentProvider {
     private NavigableMap<String, String> joined = new TreeMap<String, String>();
     static final int SERVER_PORT = 10000;
     static final String MASTER_PORT = "11108";
-    static String PORT;
+    Message replyMessage = null;
+    MatrixCursor matrixCursor = null;
 
     @Override
     public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -55,7 +59,7 @@ public class SimpleDhtProvider extends ContentProvider {
     public Uri insert(Uri uri, ContentValues values) {
         try {
             String key = genHash((String) values.get("key"));
-            if (next.equals(previous) || key.compareTo(previous) > 0 && key.compareTo(nodeId) <= 0 || (nodeId.equals(joined.firstKey()) && (key.compareTo(joined.lastKey()) > 0 || key.compareTo(nodeId) < 0))) {
+            if (next.equals(nodeId) || key.compareTo(previous) > 0 && key.compareTo(nodeId) <= 0 || (nodeId.equals(joined.firstKey()) && (key.compareTo(joined.lastKey()) > 0 || key.compareTo(nodeId) < 0))) {
                 insertDB(values, key);
             } else {
                 passForward(values, key);
@@ -86,7 +90,6 @@ public class SimpleDhtProvider extends ContentProvider {
         database = new Database(getContext());
         TelephonyManager tel = (TelephonyManager) getContext().getSystemService(Context.TELEPHONY_SERVICE);
         String portStr = tel.getLine1Number().substring(tel.getLine1Number().length() - 4);
-        PORT = portStr;
         myPort = String.valueOf((Integer.parseInt(portStr) * 2));
         try {
             nodeId = genHash(portStr);
@@ -116,7 +119,11 @@ public class SimpleDhtProvider extends ContentProvider {
     public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs,
                         String sortOrder) {
         if (selection.equals("*")) {
-            return getAll();
+            if (next.equals(nodeId)) {
+                return database.getAllMessages();
+            } else {
+                return getAll();
+            }
         } else if (selection.equals("@")) {
             return database.getAllMessages();
         } else {
@@ -130,12 +137,27 @@ public class SimpleDhtProvider extends ContentProvider {
                 if (key.compareTo(joined.lastKey()) > 0 || key.compareTo(joined.firstKey()) <= 0) {
                     return database.query(selection);
                 }
-            } else {
-
             }
-            return database.query(selection);
-        }
+            if (key.compareTo(previous) > 0 && key.compareTo(nodeId) <= 0) {
+                return database.query(selection);
+            }
 
+            Message message = new Message();
+            message.setStatus(MessageStatus.QUERY);
+            message.setKey(selection);
+            message.setHashCode(key);
+            message.setPort(myPort);
+            new ClientQueryTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, message);
+            while (true) {
+                if (replyMessage != null) {
+                    MatrixCursor cursor = new MatrixCursor(new String[]{"key", "value"});
+                    cursor.addRow(new String[]{replyMessage.getKey(), replyMessage.getValue()});
+                    replyMessage = null;
+                    return cursor;
+                }
+            }
+
+        }
     }
 
     @Override
@@ -155,11 +177,33 @@ public class SimpleDhtProvider extends ContentProvider {
     }
 
     public Cursor getAll() {
-        return database.getAllMessages();
+        Message message = new Message();
+        database.getAllMessages();
+        message.setPort(myPort);
+        message.setStatus(MessageStatus.QAll);
+        new ClientQueryAllTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, message);
+        while (true) {
+            if (matrixCursor != null) {
+                Cursor cursor = matrixCursor;
+                matrixCursor = null;
+                return cursor;
+            }
+        }
     }
 
     public void deleteAll() {
 
+    }
+
+    public List<String[]> getListFromCursor(Cursor cursor) {
+        List<String[]> list = new ArrayList<String[]>();
+        cursor.moveToFirst();
+        while (!cursor.isAfterLast()) {
+            String[] s = new String[]{cursor.getString(0), cursor.getString(1)};
+            list.add(s);
+            cursor.moveToNext();
+        }
+        return list;
     }
 
     public void join() {
@@ -175,6 +219,9 @@ public class SimpleDhtProvider extends ContentProvider {
         if (previous == null) {
             previous = joined.lastKey();
         }
+        System.out.println(nodeId);
+        System.out.println(next);
+        System.out.println(previous);
     }
 
     private class ServerTask extends AsyncTask<ServerSocket, String, Void> {
@@ -193,7 +240,8 @@ public class SimpleDhtProvider extends ContentProvider {
                             message.setJoined(joined);
                             message.setStatus(MessageStatus.ACK);
                             writeToAll(message);
-
+                            objectInputStream.close();
+                            socket.close();
                         } else if (message.getStatus().equals(MessageStatus.ACK)) {
                             joined = message.getJoined();
                             updateLinks();
@@ -203,9 +251,33 @@ public class SimpleDhtProvider extends ContentProvider {
                             } else {
                                 new ClientInsertTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, message);
                             }
+                        } else if (message.getStatus().equals(MessageStatus.QUERY)) {
+                            if ((nodeId.equals(joined.firstKey()) && (message.getHashCode().compareTo(joined.lastKey()) > 0 || message.getHashCode().compareTo(nodeId) < 0)) || message.getHashCode().compareTo(previous) > 0 && message.getHashCode().compareTo(nodeId) <= 0) {
+                                writeBackQuery(database.query(message.getKey()), message);
+                            } else {
+                                new ClientQueryTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, message);
+                            }
+                        } else if (message.getStatus().equals(MessageStatus.QREPLY)) {
+                            replyMessage = message;
+                        } else if (message.getStatus().equals(MessageStatus.QAll)) {
+                            if (message.getPort().equals(myPort)) {
+                                List<String[]> list = getListFromCursor(database.getAllMessages());
+                                list.addAll(message.getKeyValuePairs());
+                                MatrixCursor m = new MatrixCursor(new String[]{"key", "value"});
+                                for (String[] s : list) {
+                                    m.addRow(new String[]{s[0], s[1]});
+                                }
+                                matrixCursor = m;
+                            } else {
+                                Cursor cursor = database.getAllMessages();
+                                message.getKeyValuePairs().addAll(getListFromCursor(cursor));
+                                new ClientQueryAllTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, message);
+                            }
                         }
+
                         objectInputStream.close();
                         socket.close();
+
                     } catch (ClassNotFoundException e) {
                         e.printStackTrace();
                     }
@@ -221,6 +293,21 @@ public class SimpleDhtProvider extends ContentProvider {
             contentValues.put("key", message.getKey());
             contentValues.put("value", message.getValue());
             insertDB(contentValues, message.getHashCode());
+        }
+
+        private void writeBackQuery(Cursor cursor, Message message) {
+            cursor.moveToFirst();
+            try {
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                        Integer.valueOf(message.getPort()));
+                message.setStatus(MessageStatus.QREPLY);
+                message.setValue(cursor.getString(1));
+                ObjectOutputStream objectOutputStream = new ObjectOutputStream(socket.getOutputStream());
+                objectOutputStream.writeObject(message);
+                objectOutputStream.flush();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
 
         private void writeToAll(Message message) throws IOException {
@@ -274,6 +361,44 @@ public class SimpleDhtProvider extends ContentProvider {
             }
             return null;
         }
+
     }
 
+    private class ClientQueryTask extends AsyncTask<Message, Void, Void> {
+
+        @Override
+        protected Void doInBackground(Message... messages) {
+            Message message = messages[0];
+            try {
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.valueOf(joined.get(next)));
+                ObjectOutputStream objectOutputStream = new ObjectOutputStream(socket.getOutputStream());
+                objectOutputStream.writeObject(message);
+                objectOutputStream.flush();
+            } catch (UnknownHostException e) {
+                e.printStackTrace();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            return null;
+        }
+    }
+
+    private class ClientQueryAllTask extends AsyncTask<Message, Void, Void> {
+        @Override
+        protected Void doInBackground(Message... messages) {
+            Message message = messages[0];
+            try {
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.valueOf(joined.get(next)));
+                ObjectOutputStream objectOutputStream = new ObjectOutputStream(socket.getOutputStream());
+                objectOutputStream.writeObject(message);
+                objectOutputStream.flush();
+            } catch (UnknownHostException e) {
+                e.printStackTrace();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            return null;
+        }
+    }
 }
+

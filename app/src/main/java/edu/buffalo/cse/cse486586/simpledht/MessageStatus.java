@@ -7,5 +7,8 @@ package edu.buffalo.cse.cse486586.simpledht;
 public enum MessageStatus {
     JOIN,
     ACK,
-    INSERT
+    INSERT,
+    QUERY,
+    QREPLY,
+    QAll
 }

@@ -3,6 +3,8 @@ package edu.buffalo.cse.cse486586.simpledht;
 import android.content.ContentValues;
 
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 
@@ -18,6 +20,7 @@ public class Message implements Serializable {
     private String value;
     private MessageStatus status;
     private NavigableMap<String, String> joined = new TreeMap<String, String>();
+    private List<String[]> keyValuePairs = new ArrayList();
 
     public String getNodeHash() {
         return nodeHash;
@@ -73,6 +76,14 @@ public class Message implements Serializable {
 
     public void setStatus(MessageStatus status) {
         this.status = status;
+    }
+
+    public List<String[]> getKeyValuePairs() {
+        return keyValuePairs;
+    }
+
+    public void setKeyValuePairs(List<String[]> keyValuePairs) {
+        this.keyValuePairs = keyValuePairs;
     }
 
     @Override
