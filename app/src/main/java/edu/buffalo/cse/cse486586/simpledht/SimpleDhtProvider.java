@@ -45,7 +45,6 @@ public class SimpleDhtProvider extends ContentProvider {
         } else {
             database.deleteAll();
         }
-
         return 1;
     }
 
